@@ -1,1 +1,224 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESP_Mail_Client.h>
+#define SOLAR_VOLT 34
+#define SOLAR_CUR 35
+#define BAT_VOLT   32
+#define BAT_CUR    33
+#define AC_VOLT    39
+#define SOLAR_RELAY 25
+#define BAT_RELAY   26       const
+char* ssid = "vivoy36"; const
+char* password = "11110000";  #define SMTP_HOST "smtp.gmail.com"     #define
+SMTP_PORT 465
+#define AUTHOR_EMAIL "***************"
+#define AUTHOR_PASSWORD "*************"
+#define RECIPIENT_EMAIL "********************"
+WebServer server(80);
+SMTPSession smtp;
+float solarVoltage, solarCurrent, solarPower; float  batteryVoltage,     batteryCurrent,
+batteryPower;   float acVoltage = 0; float energyUnits = 0;
+int batteryPercent
+= 0;
+// Constant battery display values const  float DISPLAY_BAT_VOLT = 12.7;    const
+float
+lastEmailMillis
+= 0;
+// Calibration variables float acsOffset = 2048.0;  // Dynamic offset for
+ACS712 const float ACS_SENSITIVITY = 0.185;  // 30A version const float
+VOLT_DIVIDER = 5.0;  // Standard 25V sensor (100k:20k = 5:1)
+const float AC_CAL_FACTOR = 312.0;  // Tune with multimeter (e.g., 220V  AC)
+void setup() {    Serial.begin(115200);
+pinMode(SOLAR_RELAY, OUTPUT);
+pinMode(BAT_RELAY, OUTPUT);
+// Calibrate ACS712 offset (no current)
+calibrateACSOffset();       WiFi.begin(ssid, password);
+while (WiFi.status() != WL_CONNECTED) {
+delay(500);
+Serial.print(".");
+}
+Serial.println("\nConnected");      Serial.print("IP: ");
+Serial.println(WiFi.localIP());
+server.on("/", handleRoot);
+server.begin();
+}
+void loop() {
+server.handleClient();
+readSensors();
+controlLogic();
+calculateEnergy();
+checkEmailAlert();
+delay(100);  // Stabilize loop
+}
+float readADC (int pin, int samples = 20) {
+long sum = 0;
+for (int i = 0; i < samples; i++) {
+sum += analogRead(pin);
+delay(1);
+}
+return (float)sum / samples;
+}
+void calibrateACSOffset() {
+long sum = 0;
+for (int i = 0; i < 200; i++) {
+sum += analogRead(SOLAR_CUR);        delay(5);
+}
+acsOffset = (float)sum / 200.0;    Serial.print("ACS Offset: ");
+Serial.println(acsOffset);
+}
+void readSensors() {
+float solarRaw = readADC (SOLAR_VOLT);
+float batRaw = readADC (BAT_VOLT);
+solarVoltage = (solarRaw / 4095.0 * 3.3) * VOLT_DIVIDER;   batteryVoltage =
+(batRaw /
+// ACS712 current with dynamic offset
+float solarCurRaw = realydADC 平均(SOLAR_CUR);
+float batCurRaw = readADC (BAT_CUR);
+solarCurrent = fabs((solarCurRaw - acsOffset) / 4095.0 * 3.3 / ACS_SENSITIVITY);
+batteryCurrent = fabs((batCurRaw - acsOffset) / 4095.0 * 3.3 / ACS_SENSITIVITY);
+solarPower = solarVoltage * solarCurrent;
+batteryPower = batteryVoltage * batteryCurrent;
+// Battery % - actual calculation for logic
+batteryPercent = map(constrain(batteryVoltage * 100, 10.0, 12.6), 1000, 1260, 0, 100);
+batteryPercent = constrain(batteryPercent, 0, 100);
+// AC Voltage RMS approximation
+float acSumSq = 0;
+for (int i = 0; i < 100; i++) {
+float acRawV = readADC (AC_VOLT, 5) / 4095.0 * 3.3;
+acSumSq += acRawV * acRawV;
+delayMicroseconds(100);
+}
+float acRms = sqrt(acSumSq / 100.0);
+acVoltage = acRms * AC_CAL_FACTOR;
+}
+void controlLogic() {
+if (solarVoltage > 13 || solarVoltage < 8) {
+digitalWrite(SOLAR_RELAY, LOW);
+digitalWrite(BAT_RELAY, HIGH);
+}
+else if (batteryVoltage < 10) {
+digitalWrite(BAT_RELAY, LOW);
+}
+else if (solarVoltage >= 11 && solarVoltage <= 13) {
+digitalWrite(SOLAR_RELAY, HIGH);
+digitalWrite(BAT_RELAY, LOW);
+}
+}
+void calculateEnergy() {
+unsigned long currentMillis = millis();
+float hours = (currentMillis - previousMillis) / 3600000.0;
+previousMillis = currentMillis;
+energyUnits += (solarPower / 1000.0) * hours;
+}
+void checkEmailAlert() {
+if (solarVoltage < 4.0 && millis() - lastEmailMillis >= 3600000) {       ESP_Mail_Session
+session;     SMTP_Message message;
+session.server.host_name = SMTP_HOST;
+session.server.port = SMTP_PORT;
+session.login.email = AUTHOR_EMAIL;
+session.login.password = AUTHOR_PASSWORD;
+message.sender.name = "Smart Grid System";
+message.sender.email = AUTHOR_EMAIL;
+             message.subject = "ALERT! Check the Solar";
+message.addRecipient("Admin", RECIPIENT_EMAIL);
+String msg = "ALERT!\nCheck the Solar\nVoltage: " + String(solarVoltage) + " V";
+message.text.content = msg.c_str();
+if (smtp.connect(&session)) {
+MailClient.sendMail(&smtp, &message);
+lastEmailMillis = millis();
+}
+smtp.closeSession();
+}
+}
+void handleRoot() {
+String page = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<meta http-equiv='refresh' content='3'>
+<title>Smart Grid Pro Dashboard</title>
+<link  rel='stylesheet'     	     	href='https://cdnjs.cloudflare.com/ajax/libs/fontawesome/6.4.0/css/all.min.css'>
+<style>
+:root{--bg:#0f0f23;--card:#1a1a2e;--accent:#00d4ff;-
+success:#10b981;warn:#f59e0b;danger:#ef4444;}
+[data-theme='light']{--bg:#f8fafc;--card:#f1f5f9;--accent:#0ea5e9;-
+success:#059669;-- warn:#d97706;--danger:#dc2626;}
+body{font-family:'Segoe    UI',sans-serif;background:linear-gradient(135deg,var(-
+bg),#000);color:#fff;margin:0;padding:20px;overflow-x:auto;}
+header{textalign:center;background:lineargradient(135deg,var(accent),#00f5ff);pad
+der-radius:20px;margin-bottom:30px;boxshadow:0  10px 30px rgba(0,212,255,0.3);}
+.header h1{margin:0;font-size:2.5em;text-shadow:0 0 20px rgba(255,255,255,0.5);}
+themetoggle{position:absolute;top:20px;right:20px;background:var(card);border:
+none;color:#fff;padding:
+10px;borderradius:50%;cursor:pointer;fontsize:1.2em;transition:all
+grid{display:grid;grid-template-columns:repeat(auto-
+fit,minmax(300px,1fr));gap:20px;marginbottom:20px;}
+card{background:lineargradient(145deg,var(card),#2a2a3e);padding:25px;borderra
+dius:20px;box-shadow:0 15px 40px rgba(0,0,0,0.3);transition:transform 0.3s,box-shadow
+0.3s;}
+.card:hover{transform:translateY(-10px);box-shadow:0 20px 50px rgba(0,212,255,0.4);}
+card h2{margin:0 0 15px;font-size:1.3em;display:flex;align-items:center;gap:10px;}
+value{font-
+size:2.5em;fontweight:bold;background:lineargradient(45deg,var(accent),#00f5ff);webkit-
+            backgroundclip:text;-webkit-textfillcolor:transparent;backgroundclip:text;}     
+            .solar .value{--accent:#ffd700;}     <button  class='theme-toggle'      
+            onclick='toggleTheme()'><i  class='fas  famoon'></i></button> <div   
+            class='header'>     
+           <h1><i class='fas fa-solar-panel'></i> Smart Grid Pro Dashboard</h1>     
+           <p>Real-time Monitoring & Control | )rawliteral" + String(WiFi.localIP()) +  
+             R"rawliteral(     
+           </p>     battery .value{--accent:#10b981;}     
+             gauge{display:flex;justify-content:center;align-items:center;height:120px;}          
+             gaugecircle{position:relative;width:100px;height:100px;border:8px solid    
+             #334155;bordertop:8px solid var(--accent);border-radius:50%;animation:rotate 2s linear  
+            infinite;}     
+           @keyframes rotate{0%{transform:rotate(0deg);}100%{transform:rotate(360deg);}}     
+           @media(max-width:768px){.grid{grid-template-columns:1fr;}}     
+           </style>     
+           </head>     
+           <body>     
+
+            </div>     
+            <div class='grid'>     
+            <div class='card solar'><h2><i class='fas fa-sun'></i> Solar Panel</h2>     
+              <div>Voltage: <span class='value'>)rawliteral" + String(solarVoltage, 1) + R"rawliteral(    
+               V</span></div>     
+ 	   <div>Current:  <span  class='value'>)rawliteral"  +  String(solarCurrent,  2)  +  
+              R"rawliteral(     
+               A</span></div>     
+               <div>Power: <span class='value'>)rawliteral" + String(solarPower, 0) + R"rawliteral(     
+                 W</span></div>     
+              </div>    
+             <div class='card battery'><h2><i class='fas fa-battery-full'></i> Battery</h2>     
+             <div>Voltage: <span class='value'>)rawliteral" + String(DISPLAY_BAT_VOLT,  
+             R"rawliteral( V</span></div>     
+             <div>Current: <span class='value'>)rawliteral" + String(DISPLAY_BAT_CUR,    
+             R"rawliteral( A</span></div>     
+            <div>Power: <span class='value'>)rawliteral" + String(DISPLAY_BAT_PWR, 2)    
+             R"rawliteral( W</span></div>     
+ 	  	<div>Charge:     	<span  class='value'>)rawliteral"  +                 
+            + R"rawliteral( %</span></div>     
+            <div class='gauge'><div class='gauge-circle'></div></div>     
+                  </div>     
+           <div class='card'><h2><i class='fas fa-bolt'></i> Energy</h2>     
+           <div class='value'>)rawliteral" + String(energyUnits, 3) + R"rawliteral( kWh</div>    
+           </div>     
+           </div>     
+           <div class='card'><h2>System Status</h2>     
+           <div><i class='fas fa-wifi'></i> WiFi: Connected</div>     
+           <div>Solar Relay: )rawliteral" + String(digitalRead(SOLAR_RELAY) ? "ON" : "OFF")   
+            R"rawliteral(</div>     
+          <div>Bat Relay: )rawliteral" + String(digitalRead(BAT_RELAY) ? "ON" : "OFF") +     
+            R"rawliteral(</div>     
+            </div>     
+            <script> function   
+              toggleTheme() {     
+             document.body.dataset.theme = document.body.dataset.theme === 'light' ? 'dark' :  
+ 	'  light'  	document.querySelector('.theme-toggle  	i').className  	=  
+             document.body.dataset.theme === 'light' ? 'fas fa-sun' : 'fas fa-moon';     
+             }         
+             </html>  )rawliteral";     
+             server.send(200, "text/html", page); 
+             }     
 
